@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+
+"""
+git-time-machine - handy tool to navigate timelines in git repositories
+License: BSD 3-Clause
+Copyright (c) 2020, Mauro <mauro@sdf.org>
+All rights reserved.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+1. Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+"""
+
+__author__ = "Mauro L."
+__version__ = "0.0.1"
+__license__ = "BSD3"
+
+
+from sys import exit
+
+try:
+    import py_cui
+except ImportError as e:
+    print(
+        "You need `py_cui` in order to run this program.\n"
+        "try:\n\tpip3 install --user py_cui"
+    )
+    exit(1)
+
+import re
+import shlex
+import logging
+import threading
+import subprocess as sp
+from random import choice
+
+
+class TimeMachine(object):
+    def __init__(self, master):
+        # UI and widgets
+        self.master = master
+        self.log_window = self.master.add_scroll_menu(
+            "git log", 0, 0, row_span=3, column_span=2
+        )
+        self.branch_window = self.master.add_scroll_menu(
+            "git branch", 0, 2, row_span=3, column_span=1
+        )
+        self.master.set_status_bar_text(
+            "Press [q] to exit, [r] to refresh windows. "
+            "Arrow Keys to move between widgets. "
+            "Enter to enter focus mode. "
+        )
+
+        # hotkeys
+        self.master.add_key_command(py_cui.keys.KEY_R_LOWER, self.refresh_windows)
+        self.master.add_key_command(py_cui.keys.KEY_R_UPPER, self.refresh_windows)
+        self.log_window.add_key_command(py_cui.keys.KEY_ENTER, self.pre_git_checkout)
+        self.branch_window.add_key_command(py_cui.keys.KEY_ENTER, self.pre_git_checkout)
+
+        # colors
+        self.log_window.add_text_color_rule(
+            ".*merge.*", py_cui.YELLOW_ON_BLACK, "contains", match_type="regex"
+        )
+        self.log_window.add_text_color_rule(
+            ".*Merge.*", py_cui.YELLOW_ON_BLACK, "contains", match_type="regex"
+        )
+        self.branch_window.add_text_color_rule(
+            ".*\*.*", py_cui.CYAN_ON_BLACK, "contains", match_type="regex"
+        )
+
+        # Go!
+        self.refresh_windows()
+
+    # git commands
+    def git(self, args, check_output=True):
+        "Base git system call"
+        cmd = f"git {args}"
+        if check_output:
+            return sp.check_output(shlex.split(cmd)).decode("utf-8")
+        else:
+            sp.call(shlex.split(cmd))
+
+    def git_log(self):
+        "returns git log as: sha|date|who|message"
+        log = self.git("log --pretty=format:'%h|%cr|%an|%s'").split("\n")
+        self.current_mode = "log"
+        self.log_window.clear()
+        self.log_window.add_item_list(log)
+
+    def git_branch(self):
+        "returns branch list"
+        branches = self.git("branch").split("\n")
+        self.current_mode = "branch"
+        self.branch_window.clear()
+        self.branch_window.add_item_list(branches)
+        self.branch_window.update_height_width()
+
+    def git_checkout(self, commit):
+        "moves HEAD to..."
+        self.git(f"checkout {commit} -q", False)
+
+    # TUI
+    def _refresh_windows(self):
+        "refresh git branch and git log windows."
+        self.git_branch()
+        self.git_log()
+        self.master.move_focus(self.log_window)
+        self.master.stop_loading_popup()
+
+    def refresh_windows(self):
+        "shows a loading window while the windows are being refreshed."
+        self.master.show_loading_icon_popup(choice(["⏰", "🕰", "⌛", "⏳"]), "Loading")
+        operation_thread = threading.Thread(target=self._refresh_windows)
+        operation_thread.start()
+
+    def pre_git_checkout(self):
+        "asks for confirmation before doing a checkout."
+        current_selection = self.master.get_selected_widget().get()
+        if current_selection is None:
+            self.master.show_error_popup(
+                "Nothing selected", "There is nothing to checkout!"
+            )
+            return
+
+        # if there's a pipe, it's a commit. otherwise it's a branch
+        if "|" in current_selection:
+            _, current_selection = current_selection.rsplit("|", 1)
+
+        self.master.show_yes_no_popup(
+            f"You're about to switch to `{current_selection}`. Continue?",
+            self.do_git_checkout,
+        )
+
+    def do_git_checkout(self, *args):
+        "gets current selected widget -> the current selection, then git-checkouts it."
+        current_selection = self.master.get_selected_widget().get()
+        current_selection = current_selection.split("|", 1)[0]
+        # top notch sanitization, in case it's a branch.
+        current_selection = re.sub("^\* ", "", current_selection)
+        self.git_checkout(current_selection)
+        self.refresh_windows()
+
+
+if __name__ == "__main__":
+    root = py_cui.PyCUI(3, 3)
+    root.set_title("GIT Time Machine")
+    root.enable_logging(logging_level=logging.DEBUG)
+    s = TimeMachine(root)
+    root.start()
